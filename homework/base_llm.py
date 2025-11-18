@@ -28,7 +28,7 @@ class BaseLLM:
         This would be a default implementation applies a basic chat template.
         Override this in subclasses for different behavior (e.g., SFT/RFT models should return raw questions).
         """
-        raise NotImplementedError()
+        return question
 
     def parse_answer(self, answer: str) -> float:
         """
@@ -52,8 +52,8 @@ class BaseLLM:
         - decode the outputs with self.tokenizer.decode
 
         """
-        raise NotImplementedError()
-        # return self.batched_generate([prompt])[0]   # If you feel confident, just use this line of code and move straight to batched_generate.
+        # raise NotImplementedError()
+        return self.batched_generate([prompt])[0]   # If you feel confident, just use this line of code and move straight to batched_generate.
 
     @overload
     def batched_generate(
@@ -107,6 +107,7 @@ class BaseLLM:
         Pro Tip: Only batch_decode generated tokens by masking out the inputs with
                  outputs[:, len(inputs["input_ids"][0]) :]
         """
+        # code help from ChatGPT
         from tqdm import tqdm  # Importing tqdm for progress bar
 
         # Preventing OOM
@@ -127,7 +128,75 @@ class BaseLLM:
                 )
             ]
 
-        raise NotImplementedError()
+        # Apply prompt formatting
+        formatted_prompts = [self.format_prompt(p) for p in prompts]
+
+        # Left padding so generation happens on the right end
+        self.tokenizer.padding_side = "left"
+
+        # Ensure we have a pad token (if not, reuse eos)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Tokenize
+        inputs = self.tokenizer(
+            formatted_prompts,
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        # How many sequences per prompt?
+        if num_return_sequences is None:
+            num_seqs = 1
+        else:
+            num_seqs = num_return_sequences
+
+        # Generation arguments
+        gen_kwargs = {
+            "max_new_tokens": 50,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "num_return_sequences": num_seqs,
+        }
+
+        # Greedy vs sampling
+        if temperature is not None and temperature > 0:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = temperature
+        else:
+            gen_kwargs["do_sample"] = False
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs.get("attention_mask", None),
+                **gen_kwargs,
+            )
+
+        # Remove the input tokens, keep only newly generated tokens
+        input_len = inputs["input_ids"].shape[1]  # same for all because we padded
+        generated_tokens = outputs[:, input_len:]
+
+        # Decode
+        decoded = self.tokenizer.batch_decode(
+            generated_tokens,
+            skip_special_tokens=True,
+        )
+
+        # Shape the return value according to num_return_sequences
+        if num_return_sequences is None:
+            # One string per prompt
+            return decoded  # len(decoded) == len(prompts)
+
+        # Group into list[list[str]]: one list of generations per input prompt
+        grouped: list[list[str]] = []
+        for i in range(len(prompts)):
+            start = i * num_seqs
+            end = (i + 1) * num_seqs
+            grouped.append(decoded[start:end])
+
+        return grouped
 
     def answer(self, *questions) -> list[float]:
         """
