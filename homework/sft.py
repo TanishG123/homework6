@@ -1,3 +1,10 @@
+from pathlib import Path
+from typing import Any
+
+import torch
+from transformers import Trainer, TrainingArguments
+from peft import LoraConfig, get_peft_model, PeftModel
+
 from .base_llm import BaseLLM
 from .data import Dataset, benchmark
 
@@ -8,7 +15,10 @@ class SFTModel(BaseLLM):
         SFT models are trained on raw questions without chat templates.
         Return the question as-is.
         """
-        raise NotImplementedError()
+        return (
+            f"{question}\n"
+            "Give only the final numeric result inside <answer>...</answer>."
+        )
 
 
 def load() -> SFTModel:
@@ -58,7 +68,23 @@ def format_example(prompt: str, answer: str) -> dict[str, str]:
     """
     Construct a question / answer pair. Consider rounding the answer to make it easier for the LLM.
     """
-    raise NotImplementedError()
+    # code help from CHatGPT
+
+    try:
+        ans_val = float(answer)
+        ans_str = f"{ans_val:.4f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        ans_str = str(answer)
+
+    question_text = (
+        f"{prompt}\n"
+        "Give only the final numeric result inside <answer>...</answer>."
+    )
+
+    return {
+        "question": question_text,
+        "answer": f"<answer>{ans_str}</answer>",
+    }
 
 
 class TokenizedDataset:
@@ -87,7 +113,66 @@ def train_model(
     output_dir: str = "./homework/sft_model",
     **kwargs,
 ):
-    raise NotImplementedError()
+    # code help form ChatGPT
+    # 1) Initialize base LLM (loads the base SmolLM2 and tokenizer)
+    llm = SFTModel()
+
+    # 2) Wrap underlying model with a LoRA adapter
+    #    Keep r small enough so adapter stays under the size limit.
+    r = 8
+    lora_alpha = 32  # ~4x r is a good rule of thumb
+
+    lora_config = LoraConfig(
+        r=r,
+        lora_alpha=lora_alpha,
+        target_modules="all-linear",
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+    lora_model = get_peft_model(llm.model, lora_config)
+
+    # Avoid bug when using gradient_checkpointing on GPU
+    if hasattr(lora_model, "enable_input_require_grads") and torch.cuda.is_available():
+        lora_model.enable_input_require_grads()
+
+    # 3) Build datasets
+    train_data = Dataset("train")
+    valid_data = Dataset("valid")
+
+    train_dataset = TokenizedDataset(llm.tokenizer, train_data, format_example)
+    valid_dataset = TokenizedDataset(llm.tokenizer, valid_data, format_example)
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # 4) TrainingArguments
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        logging_dir=output_dir,
+        report_to=["tensorboard"],
+        per_device_train_batch_size=32,
+        per_device_eval_batch_size=32,
+        num_train_epochs=5,
+        learning_rate=5e-5,
+        gradient_checkpointing=True,
+        save_strategy="epoch",
+        logging_steps=50,
+        fp16=torch.cuda.is_available(),
+    )
+
+    # 5) Trainer
+    trainer = Trainer(
+        model=lora_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+    )
+
+    # 6) Train and save adapter
+    trainer.train()
+    trainer.save_model(output_dir)
+
+    # Quick sanity check on valid set
     test_model(output_dir)
 
 
