@@ -10,9 +10,9 @@
   "is_world_process_zero": true,
   "log_history": [],
   "logging_steps": 50,
-  "max_steps": 160,
+  "max_steps": 256,
   "num_input_tokens_seen": 0,
-  "num_train_epochs": 5,
+  "num_train_epochs": 8,
   "save_steps": 500,
   "stateful_callbacks": {
     "TrainerControl": {
@@ -26,7 +26,7 @@
       "attributes": {}
     }
   },
-  "total_flos": 244974305280000.0,
+  "total_flos": 248308776960000.0,
   "train_batch_size": 32,
   "trial_name": null,
   "trial_params": null

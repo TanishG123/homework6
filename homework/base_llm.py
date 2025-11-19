@@ -28,7 +28,24 @@ class BaseLLM:
         This would be a default implementation applies a basic chat template.
         Override this in subclasses for different behavior (e.g., SFT/RFT models should return raw questions).
         """
-        return question
+        # Code help from ChatGPT
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that continues text in a natural way.",
+            },
+            {
+                "role": "user",
+                "content": question,
+            },
+        ]
+
+        # Use the model's chat template; do NOT tokenize here
+        return self.tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
 
     def parse_answer(self, answer: str) -> float:
         """
@@ -108,11 +125,8 @@ class BaseLLM:
                  outputs[:, len(inputs["input_ids"][0]) :]
         """
         # code help from ChatGPT
-        from tqdm import tqdm  # Importing tqdm for progress bar
+        from tqdm import tqdm
 
-        # Preventing OOM
-        # Depending on your GPU batched generation will use a lot of memory.
-        # If you run out of memory, try to reduce the micro_batch_size.
         micro_batch_size = 32
         if len(prompts) > micro_batch_size:
             return [
@@ -128,17 +142,14 @@ class BaseLLM:
                 )
             ]
 
-        # Apply prompt formatting
+        # 1) Format prompts
         formatted_prompts = [self.format_prompt(p) for p in prompts]
 
-        # Left padding so generation happens on the right end
+        # 2) Left padding as required
         self.tokenizer.padding_side = "left"
-
-        # Ensure we have a pad token (if not, reuse eos)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Tokenize
         inputs = self.tokenizer(
             formatted_prompts,
             padding=True,
@@ -146,13 +157,9 @@ class BaseLLM:
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        # How many sequences per prompt?
-        if num_return_sequences is None:
-            num_seqs = 1
-        else:
-            num_seqs = num_return_sequences
+        # 3) Number of sequences per prompt
+        num_seqs = 1 if num_return_sequences is None else num_return_sequences
 
-        # Generation arguments
         gen_kwargs = {
             "max_new_tokens": 50,
             "eos_token_id": self.tokenizer.eos_token_id,
@@ -160,10 +167,9 @@ class BaseLLM:
             "num_return_sequences": num_seqs,
         }
 
-        # Greedy vs sampling
-        if temperature is not None and temperature > 0:
+        if temperature and temperature > 0:
             gen_kwargs["do_sample"] = True
-            gen_kwargs["temperature"] = temperature
+            gen_kwargs["temperature"] = float(temperature)
         else:
             gen_kwargs["do_sample"] = False
 
@@ -174,22 +180,23 @@ class BaseLLM:
                 **gen_kwargs,
             )
 
-        # Remove the input tokens, keep only newly generated tokens
-        input_len = inputs["input_ids"].shape[1]  # same for all because we padded
+        # 4) Keep only generated tokens, masking out the inputs
+        #    (exactly as suggested in the assignment)
+        input_len = inputs["input_ids"].shape[1]
         generated_tokens = outputs[:, input_len:]
 
-        # Decode
         decoded = self.tokenizer.batch_decode(
             generated_tokens,
             skip_special_tokens=True,
         )
 
-        # Shape the return value according to num_return_sequences
+        # 5) Shape the return according to num_return_sequences
         if num_return_sequences is None:
-            # One string per prompt
-            return decoded  # len(decoded) == len(prompts)
+            # One generation per prompt
+            # len(decoded) == len(prompts)
+            return decoded
 
-        # Group into list[list[str]]: one list of generations per input prompt
+        # Multiple generations per prompt: group into list[list[str]]
         grouped: list[list[str]] = []
         for i in range(len(prompts)):
             start = i * num_seqs

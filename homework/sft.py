@@ -15,9 +15,16 @@ class SFTModel(BaseLLM):
         SFT models are trained on raw questions without chat templates.
         Return the question as-is.
         """
+        example = (
+            "Example:\n"
+            "Question: 2 m in cm\n"
+            "Answer (numeric only, inside <answer>...</answer>): <answer>200</answer>\n\n"
+            "Now answer a new question.\n"
+        )
         return (
-            f"{question}\n"
-            "Give only the final numeric result inside <answer>...</answer>."
+            example
+            + f"Question: {question}\n"
+            "Answer (numeric only, inside <answer>...</answer>): "
         )
 
 
@@ -69,16 +76,20 @@ def format_example(prompt: str, answer: str) -> dict[str, str]:
     Construct a question / answer pair. Consider rounding the answer to make it easier for the LLM.
     """
     # code help from CHatGPT
+    ans_val = float(answer)
+    ans_str = f"{ans_val:.3f}".rstrip("0").rstrip(".")
 
-    try:
-        ans_val = float(answer)
-        ans_str = f"{ans_val:.4f}".rstrip("0").rstrip(".")
-    except (TypeError, ValueError):
-        ans_str = str(answer)
+    example = (
+        "Example:\n"
+        "Question: 2 m in cm\n"
+        "Answer (numeric only, inside <answer>...</answer>): <answer>200</answer>\n\n"
+        "Now answer a new question.\n"
+    )
 
     question_text = (
-        f"{prompt}\n"
-        "Give only the final numeric result inside <answer>...</answer>."
+        example
+        + f"Question: {prompt}\n"
+        "Answer (numeric only, inside <answer>...</answer>): "
     )
 
     return {
@@ -119,8 +130,8 @@ def train_model(
 
     # 2) Wrap underlying model with a LoRA adapter
     #    Keep r small enough so adapter stays under the size limit.
-    r = 8
-    lora_alpha = 32  # ~4x r is a good rule of thumb
+    r = 16
+    lora_alpha = 64
 
     lora_config = LoraConfig(
         r=r,
@@ -152,8 +163,8 @@ def train_model(
         report_to=["tensorboard"],
         per_device_train_batch_size=32,
         per_device_eval_batch_size=32,
-        num_train_epochs=5,
-        learning_rate=5e-5,
+        num_train_epochs=8,   
+        learning_rate=3e-5,    
         gradient_checkpointing=True,
         save_strategy="epoch",
         logging_steps=50,
