@@ -15,17 +15,7 @@ class SFTModel(BaseLLM):
         SFT models are trained on raw questions without chat templates.
         Return the question as-is.
         """
-        example = (
-            "Example:\n"
-            "Question: 2 m in cm\n"
-            "Answer (numeric only, inside <answer>...</answer>): <answer>200</answer>\n\n"
-            "Now answer a new question.\n"
-        )
-        return (
-            example
-            + f"Question: {question}\n"
-            "Answer (numeric only, inside <answer>...</answer>): "
-        )
+        return question
 
 
 def load() -> SFTModel:
@@ -76,21 +66,15 @@ def format_example(prompt: str, answer: str) -> dict[str, str]:
     Construct a question / answer pair. Consider rounding the answer to make it easier for the LLM.
     """
     # code help from CHatGPT
-    ans_val = float(answer)
-    ans_str = f"{ans_val:.3f}".rstrip("0").rstrip(".")
+    try:
+        val = float(answer)
+        # round to a few decimals but strip trailing zeros
+        ans_str = f"{val:.3f}".rstrip("0").rstrip(".")
+    except (ValueError, TypeError):
+        # fallback: just wrap whatever string we got
+        ans_str = str(answer).strip()
 
-    example = (
-        "Example:\n"
-        "Question: 2 m in cm\n"
-        "Answer (numeric only, inside <answer>...</answer>): <answer>200</answer>\n\n"
-        "Now answer a new question.\n"
-    )
-
-    question_text = (
-        example
-        + f"Question: {prompt}\n"
-        "Answer (numeric only, inside <answer>...</answer>): "
-    )
+    question_text = prompt.strip()
 
     return {
         "question": question_text,
@@ -125,65 +109,78 @@ def train_model(
     **kwargs,
 ):
     # code help form ChatGPT
-    # 1) Initialize base LLM (loads the base SmolLM2 and tokenizer)
+    # Initialize base LLM (loads the base SmolLM2 and tokenizer)
     llm = SFTModel()
 
-    # 2) Wrap underlying model with a LoRA adapter
-    #    Keep r small enough so adapter stays under the size limit.
-    r = 16
-    lora_alpha = 64
-
+    # LoRA configuration: focus on main projection layers
     lora_config = LoraConfig(
-        r=r,
-        lora_alpha=lora_alpha,
-        target_modules="all-linear",
+        r=16,
+        lora_alpha=64,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
         bias="none",
         task_type="CAUSAL_LM",
     )
 
     lora_model = get_peft_model(llm.model, lora_config)
 
-    # Avoid bug when using gradient_checkpointing on GPU
+    # Make sure gradients can flow correctly with LoRA
     if hasattr(lora_model, "enable_input_require_grads") and torch.cuda.is_available():
         lora_model.enable_input_require_grads()
 
-    # 3) Build datasets
-    train_data = Dataset("train")
-    valid_data = Dataset("valid")
+    # Some HF configs complain if use_cache is left on during training
+    try:
+        lora_model.config.use_cache = False
+    except Exception:
+        pass
 
+    # Build training dataset
+    train_data = Dataset("train")
     train_dataset = TokenizedDataset(llm.tokenizer, train_data, format_example)
-    valid_dataset = TokenizedDataset(llm.tokenizer, valid_data, format_example)
+
+    from transformers import DataCollatorForLanguageModeling
+
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=llm.tokenizer,
+        mlm=False,
+    )
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # 4) TrainingArguments
+    # TrainingArguments: smaller batch, more epochs, higher LR (friend-style)
     training_args = TrainingArguments(
         output_dir=output_dir,
         logging_dir=output_dir,
         report_to=["tensorboard"],
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=32,
-        num_train_epochs=8,   
-        learning_rate=3e-5,    
-        gradient_checkpointing=True,
+        num_train_epochs=15,
+        per_device_train_batch_size=8,
+        learning_rate=1e-4,
+        gradient_checkpointing=False,
         save_strategy="epoch",
-        logging_steps=50,
-        fp16=torch.cuda.is_available(),
+        logging_steps=10,
+        fp16=False,
+        warmup_steps=50,
+        save_total_limit=2,
     )
 
-    # 5) Trainer
     trainer = Trainer(
         model=lora_model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
+        data_collator=data_collator,
     )
 
-    # 6) Train and save adapter
     trainer.train()
     trainer.save_model(output_dir)
 
-    # Quick sanity check on valid set
+    # Sanity check on valid set
     test_model(output_dir)
 
 
